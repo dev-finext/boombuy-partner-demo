@@ -1,0 +1,5 @@
+# Never commit a partner key. The live mode asks for one at runtime and keeps
+# it in the browser's localStorage only.
+.env
+*.key
+node_modules/

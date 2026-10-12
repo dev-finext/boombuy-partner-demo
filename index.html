@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BoomBuy · צד השותף</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛍️</text></svg>">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">
+    <span class="logo">🛍️</span>
+    <div>
+      <h1>צד השותף</h1>
+      <p class="sub">בדיוק מה ששותף חיצוני מקבל מ-BoomBuy</p>
+    </div>
+  </div>
+
+  <div class="source">
+    <span id="sourceBadge" class="badge badge-sample">נתוני דוגמה</span>
+    <button id="btnLive" class="btn btn-ghost">התחבר ל-API חי</button>
+  </div>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button class="tab is-active" data-view="catalog" role="tab">הקטלוג</button>
+  <button class="tab" data-view="raw" role="tab">ה-JSON הגולמי</button>
+  <button class="tab" data-view="order" role="tab">הזמנה</button>
+  <button class="tab" data-view="webhook" role="tab">התראת WEBHOOK</button>
+  <button class="tab" data-view="fields" role="tab">מילון השדות</button>
+</nav>
+
+<main>
+
+  <!-- ─────────── catalogue ─────────── -->
+  <section id="view-catalog" class="view is-active">
+    <div class="toolbar">
+      <input id="search" type="search" placeholder="חיפוש לפי שם, מק״ט או קטגוריה…" autocomplete="off">
+      <label class="switch">
+        <input type="checkbox" id="onlyAvailable"> רק פריטים זמינים
+      </label>
+      <label class="switch">
+        <input type="checkbox" id="mobileView"> תצוגת תמונות מובייל
+      </label>
+      <span id="count" class="count"></span>
+    </div>
+    <div id="grid" class="grid"></div>
+    <p id="emptyState" class="empty" hidden>לא נמצאו פריטים.</p>
+  </section>
+
+  <!-- ─────────── raw feed ─────────── -->
+  <section id="view-raw" class="view">
+    <p class="lede">זו התשובה המלאה של <code>GET /api/v1/partner/products</code>, בדיוק כפי שהשותף מקבל אותה.</p>
+    <div class="toolbar">
+      <button id="copyRaw" class="btn">העתק הכל</button>
+      <span id="rawMeta" class="count"></span>
+    </div>
+    <pre id="rawJson" class="code"></pre>
+  </section>
+
+  <!-- ─────────── order ─────────── -->
+  <section id="view-order" class="view">
+    <p class="lede">
+      שותף שולח <code>POST /api/v1/partner/orders</code> — פריט אחד בכל קריאה.
+      בחר פריט מהקטלוג והטופס יתמלא לבד.
+    </p>
+
+    <div class="order-grid">
+      <form id="orderForm" class="panel">
+        <h3>הבקשה</h3>
+        <label>פריט <select id="orderItem"></select></label>
+        <label>כמות <input id="orderQty" type="number" min="1" value="1"></label>
+        <label>אופציית משלוח <select id="orderDelivery"></select></label>
+        <label>מזהה הזמנה אצל השותף <input id="orderExt" type="text"></label>
+        <label>שם הלקוח <input id="orderName" type="text" value="ישראל ישראלי"></label>
+        <label>טלפון <input id="orderPhone" type="text" value="0500000000"></label>
+        <label>אימייל <input id="orderEmail" type="email" value="test@example.com"></label>
+        <label>רחוב <input id="orderStreet" type="text" value="הרצל"></label>
+        <label>מספר בית <input id="orderHouse" type="text" value="1"></label>
+        <label>עיר <input id="orderCity" type="text" value="תל אביב"></label>
+        <div class="row">
+          <button type="button" id="btnSendOrder" class="btn btn-primary">שלח הזמנה</button>
+          <span id="orderWarn" class="warn"></span>
+        </div>
+      </form>
+
+      <div class="panel">
+        <h3>מה נשלח</h3>
+        <pre id="orderBody" class="code code-sm"></pre>
+        <h3>מה חוזר</h3>
+        <pre id="orderResp" class="code code-sm">— עדיין לא נשלחה הזמנה —</pre>
+        <div id="orderMath" class="math"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────── webhook ─────────── -->
+  <section id="view-webhook" class="view">
+    <p class="lede">
+      כשפריט יוצא מהמלאי BoomBuy שולחת <code>POST</code> לכתובת ה-WEBHOOK של השותף.
+      <strong>חזרה למלאי לא מוכרזת לעולם</strong> — השותף יגלה אותה רק במשיכת הקטלוג הבאה.
+    </p>
+    <div class="order-grid">
+      <div class="panel">
+        <h3>כותרות</h3>
+        <pre id="hookHeaders" class="code code-sm"></pre>
+      </div>
+      <div class="panel">
+        <h3>גוף ההודעה</h3>
+        <label class="inline">פריט <select id="hookItem"></select></label>
+        <pre id="hookBody" class="code code-sm"></pre>
+      </div>
+    </div>
+    <div class="panel note">
+      <h3>מה השותף חייב לעשות</h3>
+      <ol>
+        <li>לאמת את החתימה ב-<code>X-BoomBuy-Signature</code> — <code>HMAC-SHA256</code> של <code>timestamp.body</code> עם מפתח ה-API שלו.</li>
+        <li>לדחות חותמת זמן ישנה, כדי למנוע שליחה חוזרת של הודעה שנלכדה.</li>
+        <li>להחזיר <code>200</code> מיד. תשובה איטית נחשבת ככישלון, ואחרי כמה כישלונות רצופים נפסיק לנסות לזמן מה.</li>
+        <li>לסגור את הפריט למכירה אצלו.</li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- ─────────── field dictionary ─────────── -->
+  <section id="view-fields" class="view">
+    <p class="lede">כל שדה שחוזר בשורת קטלוג, ומה הוא אומר.</p>
+    <table class="fields">
+      <thead><tr><th>שדה</th><th>משמעות</th></tr></thead>
+      <tbody id="fieldsBody"></tbody>
+    </table>
+  </section>
+
+</main>
+
+<!-- ─────────── live-connection dialog ─────────── -->
+<dialog id="liveDlg">
+  <form method="dialog" class="dlg">
+    <h3>חיבור ל-API חי</h3>
+    <p class="dlg-note">
+      המפתח נשמר <strong>רק בדפדפן שלך</strong> (localStorage) ולא נשלח לשום מקום חוץ מ-BoomBuy.
+      הוא לא נשמר בקוד של האתר.
+    </p>
+    <label>כתובת בסיס
+      <input id="liveBase" type="url" placeholder="https://boomclub.org.il" value="https://boomclub.org.il">
+    </label>
+    <label>מפתח API
+      <input id="liveKey" type="password" placeholder="bbk_…" autocomplete="off">
+    </label>
+    <p class="dlg-warn">
+      ⚠️ הקריאה יוצאת <strong>מהדפדפן שלך</strong>, כך ש-<strong>כתובת ה-IP שלך</strong> חייבת להיות
+      ברשימה המורשית של השותף. מכתובת אחרת תתקבל שגיאת 401.
+    </p>
+    <div class="row">
+      <button value="connect" class="btn btn-primary">התחבר</button>
+      <button value="sample" class="btn btn-ghost">חזרה לנתוני דוגמה</button>
+      <button value="cancel" class="btn btn-ghost">ביטול</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ─────────── item detail ─────────── -->
+<dialog id="itemDlg">
+  <div class="dlg dlg-wide">
+    <button id="itemClose" class="x" aria-label="סגור">✕</button>
+    <div id="itemBody"></div>
+  </div>
+</dialog>
+
+<script src="assets/app.js"></script>
+</body>
+</html>
