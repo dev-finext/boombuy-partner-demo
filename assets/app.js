@@ -1,30 +1,32 @@
 /*
- * The partner's side of the BoomBuy integration, rendered from the same JSON a
- * partner actually receives.
+ * The partner's side of the BoomBuy integration, rendered from LIVE API
+ * responses. There is no bundled snapshot on purpose: the point of this page
+ * is to exercise the real endpoint, and a frozen copy would quietly stop
+ * telling the truth the first time the contract changed.
  *
- * Two sources, and the distinction matters:
- *   sample — data/sample-feed.json, committed, so the page works for anyone.
- *   live   — a real GET against the partner API. The key is typed in at
- *            runtime and kept in localStorage; it is never part of the site,
- *            because this page is public and anything shipped in it is public
- *            too. The request leaves the VIEWER's browser, so the viewer's own
- *            IP has to be on the partner's allow-list.
+ * Two things to know about calling the API from a browser:
+ *   - The request leaves the VIEWER's machine, so the viewer's own IP is what
+ *     the partner's allow-list is checked against. From anywhere else: 401.
+ *   - The key in config.js is committed deliberately for this demo. See the
+ *     note in that file before reusing the pattern anywhere real.
  */
 'use strict';
 
-const SAMPLE_URL = 'data/sample-feed.json';
 const LS_KEY = 'boombuy.partner.demo';
 
 const state = {
-  items: [],
+  items: [],      // raw feed rows
+  products: [],   // rows grouped by product_id
   raw: null,
-  source: 'sample',
   base: '',
   key: '',
+  page: 1,
+  limit: 100,
+  total: null,
 };
 
-const $ = (sel) => document.querySelector(sel);
-const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => Array.from(document.querySelectorAll(s));
 
 const esc = (v) =>
   String(v ?? '').replace(/[&<>"']/g, (c) =>
@@ -37,136 +39,265 @@ const money = (n) =>
 
 const pretty = (o) => JSON.stringify(o, null, 2);
 
-/* ───────────────────────── loading ───────────────────────── */
+/* ───────────────────────── the API ───────────────────────── */
 
-async function loadSample() {
-  const res = await fetch(SAMPLE_URL);
-  if (!res.ok) throw new Error(`sample feed: HTTP ${res.status}`);
-  return res.json();
+function creds() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch { /* ignore */ }
+  const demo = window.BOOMBUY_DEMO || {};
+  return { base: saved?.base || demo.base || '', key: saved?.key || demo.key || '' };
 }
 
-async function loadLive(base, key) {
-  const url = `${base.replace(/\/+$/, '')}/api/v1/partner/products?limit=100&page=1`;
-  const res = await fetch(url, { headers: { 'X-API-Key': key } });
+async function apiGet(path) {
+  const url = `${state.base.replace(/\/+$/, '')}${path}`;
+  const t0 = performance.now();
+  const res = await fetch(url, { headers: { 'X-API-Key': state.key } });
+  const ms = Math.round(performance.now() - t0);
   const text = await res.text();
+
   if (!res.ok) {
-    // 401 here is nearly always the IP allow-list, not a bad key, so say so.
+    // 401 here is nearly always the IP allow-list rather than a bad key, and
+    // saying so saves a long hunt in the wrong place.
     const hint = res.status === 401
-      ? ' — המפתח שגוי, או שכתובת ה-IP שלך לא ברשימה המורשית של השותף'
+      ? 'המפתח שגוי, או — הרבה יותר סביר — כתובת ה-IP שממנה אתה גולש לא נמצאת ברשימה המורשית של השותף. הקריאה יוצאת מהדפדפן שלך, לא משרת.'
       : '';
-    throw new Error(`HTTP ${res.status}${hint}\n${text.slice(0, 300)}`);
+    const err = new Error(`HTTP ${res.status}`);
+    err.detail = `${hint}\n\n${text.slice(0, 400)}`;
+    err.status = res.status;
+    throw err;
   }
-  return JSON.parse(text);
+
+  return { body: JSON.parse(text), ms, url };
 }
 
-function adopt(payload, source) {
-  state.raw = payload;
-  state.items = Array.isArray(payload.items) ? payload.items : [];
-  state.source = source;
+async function loadFeed() {
+  setStatus('…טוען מה-API…', 'busy');
+  try {
+    const { body, ms, url } = await apiGet(
+      `/api/v1/partner/products?limit=${state.limit}&page=${state.page}`);
 
-  const badge = $('#sourceBadge');
-  badge.textContent = source === 'live' ? 'API חי' : 'נתוני דוגמה';
-  badge.className = `badge ${source === 'live' ? 'badge-live' : 'badge-sample'}`;
+    state.raw = body;
+    state.items = Array.isArray(body.items) ? body.items : [];
+    state.total = body.total ?? null;
+    state.products = groupByProduct(state.items);
 
-  $('#rawMeta').textContent =
-    `${state.items.length} שורות · total ${payload.total ?? '—'} · page ${payload.page ?? '—'}`;
-  $('#rawJson').textContent = pretty(payload);
+    setStatus(`✅ ${state.items.length} שורות · ${ms} ms`, 'ok');
+    $('#rawMeta').textContent =
+      `${url}\n${state.items.length} שורות · total ${body.total ?? '—'} · page ${body.page ?? '—'} · ${ms} ms`;
+    $('#rawJson').textContent = pretty(body);
 
-  renderGrid();
-  fillItemPickers();
-  renderWebhook();
+    renderGrid();
+    renderPager();
+    fillPickers();
+    renderWebhook();
+  } catch (err) {
+    setStatus(`⛔ ${err.message}`, 'bad');
+    $('#grid').innerHTML = '';
+    $('#emptyState').hidden = false;
+    $('#emptyState').innerHTML =
+      `<strong>${esc(err.message)}</strong><br><br>${esc(err.detail || '').replace(/\n/g, '<br>')}`;
+    $('#rawJson').textContent = `${err.message}\n${err.detail || ''}`;
+  }
+}
+
+function setStatus(text, kind) {
+  const el = $('#status');
+  el.textContent = text;
+  el.className = `badge badge-${kind}`;
+}
+
+/* ───────────────────────── grouping ─────────────────────────
+ * A partner's storefront shows ONE product with a size picker, not four
+ * separate listings. The feed is per item, so the grouping happens here —
+ * which is also the shape the API documents: every variation of a product
+ * lands on the same page, so product_id is enough to collect them.
+ */
+
+function groupByProduct(items) {
+  const map = new Map();
+
+  for (const it of items) {
+    if (!map.has(it.product_id)) {
+      map.set(it.product_id, {
+        product_id: it.product_id,
+        product_name: it.product_name,
+        product_sku: it.product_sku,
+        category_id: it.category_id,
+        category_name: it.category_name,
+        supplier_name: it.supplier_name,
+        description_html: it.description_html,
+        rows: [],
+      });
+    }
+    map.get(it.product_id).rows.push(it);
+  }
+
+  for (const p of map.values()) {
+    // Attribute names in first-seen order, each with its distinct values —
+    // that is exactly one <select> per attribute.
+    const names = [];
+    const values = new Map();
+    for (const r of p.rows) {
+      for (const a of r.attributes || []) {
+        if (!values.has(a.name)) { names.push(a.name); values.set(a.name, []); }
+        if (!values.get(a.name).includes(a.value)) values.get(a.name).push(a.value);
+      }
+    }
+    p.attrNames = names;
+    p.attrValues = values;
+    p.hasVariations = p.rows.some((r) => r.variation_id !== null);
+    // Open on something sellable when there is one, so the first thing a
+    // visitor sees is not an out-of-stock size.
+    p.selected = p.rows.find((r) => r.available) || p.rows[0];
+  }
+
+  return Array.from(map.values());
+}
+
+function rowFor(p, choice) {
+  return p.rows.find((r) =>
+    p.attrNames.every((n) =>
+      (r.attributes || []).find((a) => a.name === n)?.value === choice[n])) || null;
 }
 
 /* ───────────────────────── catalogue ───────────────────────── */
 
-function imagesFor(item) {
-  const useMobile = $('#mobileView').checked;
-  const imgs = item.images || {};
-  // A deliberate pass-through: `mobile` is empty on most of the catalogue, and
-  // showing an empty frame is the honest rendering of that — it is exactly what
-  // a partner would face.
-  return useMobile ? (imgs.mobile || []) : (imgs.desktop || []);
+function picsOf(row) {
+  const mobile = $('#mobileView').checked;
+  const imgs = row.images || {};
+  // Deliberately NOT falling back: `mobile` is empty on most of the catalogue
+  // and showing that honestly is the point of the toggle.
+  return mobile ? (imgs.mobile || []) : (imgs.desktop || []);
 }
 
-function visibleItems() {
+function visibleProducts() {
   const q = $('#search').value.trim().toLowerCase();
   const onlyAvail = $('#onlyAvailable').checked;
+  const onlyVars = $('#onlyVariations').checked;
 
-  return state.items.filter((it) => {
-    if (onlyAvail && !it.available) return false;
+  return state.products.filter((p) => {
+    if (onlyAvail && !p.rows.some((r) => r.available)) return false;
+    if (onlyVars && !p.hasVariations) return false;
     if (!q) return true;
     const hay = [
-      it.product_name, it.sku, it.product_sku, it.variation_sku,
-      it.category_name, it.supplier_name, it.item_id,
-      ...(it.attributes || []).map((a) => `${a.name} ${a.value}`),
+      p.product_name, p.product_sku, p.category_name, p.supplier_name,
+      ...p.rows.map((r) => `${r.item_id} ${r.sku} ${(r.attributes || []).map((a) => a.value).join(' ')}`),
     ].join(' ').toLowerCase();
     return hay.includes(q);
   });
 }
 
-function renderGrid() {
-  const list = visibleItems();
-  const grid = $('#grid');
+function cardHtml(p) {
+  const row = p.selected;
+  const pics = picsOf(row);
 
-  $('#count').textContent = `${list.length} מתוך ${state.items.length} שורות`;
-  $('#emptyState').hidden = list.length > 0;
+  const thumb = pics.length
+    ? `<img src="${esc(pics[0])}" alt="" loading="lazy"
+           onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'noimg',textContent:'התמונה לא נטענה'}))">`
+    : `<span class="noimg">אין תמונה${$('#mobileView').checked ? ' למובייל' : ''}</span>`;
 
-  grid.innerHTML = list.map((it, i) => {
-    const pics = imagesFor(it);
-    const thumb = pics.length
-      ? `<img src="${esc(pics[0])}" alt="" loading="lazy"
-             onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'noimg',textContent:'התמונה לא נטענה'}))">`
-      : `<span class="noimg">אין תמונה${$('#mobileView').checked ? ' למובייל' : ''}</span>`;
-
-    const attrs = (it.attributes || [])
-      .map((a) => `<span class="attr">${esc(a.name)}: ${esc(a.value)}</span>`).join('');
-
-    return `
-      <article class="card ${it.available ? '' : 'is-out'}" data-idx="${state.items.indexOf(it)}">
-        <div class="thumb">
-          ${thumb}
-          <span class="pill ${it.available ? 'pill-ok' : 'pill-out'}">${it.available ? 'זמין' : 'לא זמין'}</span>
-        </div>
-        <div class="card-body">
-          <span class="cat">${esc(it.category_name || '—')}</span>
-          <h3 class="name">${esc(it.product_name)}</h3>
-          ${attrs ? `<div class="attrs">${attrs}</div>` : ''}
-          <div class="card-foot">
-            <span class="price">${money(it.sale_price)}</span>
-            <span class="sku">${esc(it.item_id)}</span>
-          </div>
-        </div>
-      </article>`;
+  const selects = p.attrNames.map((name) => {
+    const chosen = (row.attributes || []).find((a) => a.name === name)?.value;
+    const opts = p.attrValues.get(name).map((v) => {
+      // Mark values whose row is unsellable, so the picker tells the truth
+      // before the customer clicks.
+      const r = p.rows.find((x) => (x.attributes || []).some((a) => a.name === name && a.value === v));
+      const out = r && !r.available ? ' (אזל)' : '';
+      return `<option value="${esc(v)}"${v === chosen ? ' selected' : ''}>${esc(v)}${out}</option>`;
+    }).join('');
+    return `<label class="pick"><span>${esc(name)}</span><select data-attr="${esc(name)}">${opts}</select></label>`;
   }).join('');
+
+  return `
+    <article class="card ${row.available ? '' : 'is-out'}" data-pid="${p.product_id}">
+      <div class="thumb">
+        ${thumb}
+        <span class="pill ${row.available ? 'pill-ok' : 'pill-out'}">${row.available ? 'זמין' : 'לא זמין'}</span>
+        ${p.hasVariations ? `<span class="pill pill-var">${p.rows.length} וריאציות</span>` : ''}
+      </div>
+      <div class="card-body">
+        <span class="cat">${esc(p.category_name || '—')}</span>
+        <h3 class="name">${esc(p.product_name)}</h3>
+        ${selects ? `<div class="picks">${selects}</div>` : ''}
+        <div class="card-foot">
+          <span class="price">${money(row.sale_price)}</span>
+          <span class="sku">${esc(row.item_id)}</span>
+        </div>
+        <button class="btn btn-sm details" data-pid="${p.product_id}">פרטים מלאים</button>
+      </div>
+    </article>`;
 }
 
-/* ───────────────────────── item detail ───────────────────────── */
+function renderGrid() {
+  const list = visibleProducts();
+  $('#count').textContent =
+    `${list.length} מוצרים · ${state.items.length} שורות בפיד`;
+  $('#emptyState').hidden = list.length > 0;
+  if (list.length) $('#emptyState').innerHTML = 'לא נמצאו מוצרים.';
+  $('#grid').innerHTML = list.map(cardHtml).join('');
+}
+
+function onPick(e) {
+  const sel = e.target.closest('select[data-attr]');
+  if (!sel) return;
+
+  const card = sel.closest('.card');
+  const p = state.products.find((x) => x.product_id === Number(card.dataset.pid));
+  if (!p) return;
+
+  const choice = {};
+  card.querySelectorAll('select[data-attr]').forEach((s) => { choice[s.dataset.attr] = s.value; });
+
+  const row = rowFor(p, choice);
+  if (!row) {
+    // Combinations that do not exist are normal with multiple attributes.
+    card.querySelector('.price').textContent = '—';
+    card.querySelector('.sku').textContent = 'אין וריאציה כזאת';
+    return;
+  }
+
+  p.selected = row;
+  card.outerHTML = cardHtml(p);
+}
+
+/* ───────────────────────── detail ───────────────────────── */
 
 function gallery(label, urls) {
-  if (!urls || !urls.length) {
-    return `<div class="gal"><span class="gal-label">${label}: ריק</span></div>`;
-  }
+  if (!urls || !urls.length) return `<div class="gal"><span class="gal-label">${label}: ריק</span></div>`;
   return `<div class="gal"><span class="gal-label">${label} (${urls.length})</span>${
     urls.map((u) => `<img src="${esc(u)}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">`).join('')
   }</div>`;
 }
 
-function showItem(idx) {
-  const it = state.items[idx];
-  if (!it) return;
+function showProduct(pid) {
+  const p = state.products.find((x) => x.product_id === pid);
+  if (!p) return;
+  const it = p.selected;
+
+  const variantTable = p.hasVariations ? `
+    <h3>כל הוריאציות של המוצר (${p.rows.length})</h3>
+    <table class="kv variants"><thead><tr>
+      <th>item_id</th>${p.attrNames.map((n) => `<th>${esc(n)}</th>`).join('')}<th>מחיר</th><th>זמין</th>
+    </tr></thead><tbody>
+      ${p.rows.map((r) => `<tr class="${r.item_id === it.item_id ? 'is-sel' : ''}">
+        <td class="sku">${esc(r.item_id)}</td>
+        ${p.attrNames.map((n) => `<td>${esc((r.attributes || []).find((a) => a.name === n)?.value ?? '—')}</td>`).join('')}
+        <td>${money(r.sale_price)}</td>
+        <td>${r.available ? '✅' : '⛔'}</td>
+      </tr>`).join('')}
+    </tbody></table>` : '';
 
   const rows = [
-    ['item_id', it.item_id],
-    ['מוצר', `${esc(it.product_name)} <span class="sku">(#${it.product_id})</span>`],
-    ['מק״ט מוצר', it.product_sku || '—'],
+    ['item_id', `<span class="sku">${esc(it.item_id)}</span>`],
+    ['מוצר', `${esc(p.product_name)} <span class="sku">(#${p.product_id})</span>`],
+    ['מק״ט מוצר', p.product_sku || '—'],
     ['וריאציה', it.variation_id ? `#${it.variation_id} ${esc(it.variation_name || '(ללא שם)')}` : '— מוצר פשוט —'],
     ['מק״ט וריאציה', it.variation_sku || '—'],
     ['מק״ט בשימוש', it.sku || '—'],
     ['מאפיינים', (it.attributes || []).length
-      ? it.attributes.map((a) => `<span class="attr">${esc(a.name)}: ${esc(a.value)}</span>`).join(' ')
-      : '—'],
-    ['קטגוריה', `${esc(it.category_name || '—')} <span class="sku">(#${it.category_id ?? '—'})</span>`],
-    ['ספק', esc(it.supplier_name || '—')],
+      ? it.attributes.map((a) => `<span class="attr">${esc(a.name)}: ${esc(a.value)}</span>`).join(' ') : '—'],
+    ['קטגוריה', `${esc(p.category_name || '—')} <span class="sku">(#${p.category_id ?? '—'})</span>`],
+    ['ספק', esc(p.supplier_name || '—')],
     ['מחיר', `<b>${money(it.sale_price)}</b>`],
     ['זמין למכירה', it.available ? '✅ כן' : '⛔ לא'],
     ['עודכן', it.modified_date || '—'],
@@ -174,14 +305,13 @@ function showItem(idx) {
 
   const delivery = (it.delivery_options || []).length
     ? `<table class="kv"><tbody>${it.delivery_options.map((d) => `
-        <tr><th>${esc(d.code)}</th><td>
-          <b>${esc(d.description)}</b> · ${money(d.cost)}
+        <tr><th>${esc(d.code)}</th><td><b>${esc(d.description)}</b> · ${money(d.cost)}
           ${d.is_individual ? ' · <b>לכל יחידה</b>' : ''}
           ${d.timeframe ? `<br><span class="sku">${esc(d.timeframe)}</span>` : ''}
-          ${d.requires_address ? '<br>דורש כתובת' : '<br>לא דורש כתובת'}
+          <br>${d.requires_address ? 'דורש כתובת' : 'לא דורש כתובת'}
           ${d.limit_per_shipment > 0 ? `<br>מגבלה למשלוח: ${d.limit_per_shipment}` : ''}
         </td></tr>`).join('')}</tbody></table>`
-    : `<p class="warn">אין לפריט הזה אף אופציית משלוח — הוא מופיע בקטלוג אבל <b>אי אפשר להזמין אותו</b>.</p>`;
+    : `<p class="warn">אין לפריט אף אופציית משלוח — הוא בקטלוג אבל <b>אי אפשר להזמין אותו</b>.</p>`;
 
   const hero = (it.images?.desktop || [])[0];
 
@@ -189,51 +319,54 @@ function showItem(idx) {
     <div class="detail-head">
       ${hero ? `<img src="${esc(hero)}" alt="" onerror="this.style.visibility='hidden'">` : ''}
       <div class="detail-meta">
-        <h2>${esc(it.product_name)}</h2>
-        <span class="cat">${esc(it.category_name || '')}</span>
+        <h2>${esc(p.product_name)}</h2>
+        <span class="cat">${esc(p.category_name || '')}</span>
         <div class="card-foot"><span class="price">${money(it.sale_price)}</span></div>
       </div>
     </div>
-
+    ${variantTable}
     ${gallery('תמונות דסקטופ', it.images?.desktop)}
     ${gallery('תמונות מובייל', it.images?.mobile)}
-
+    <h3>השדות של השורה הנבחרת</h3>
     <table class="kv"><tbody>${rows}</tbody></table>
-
     <h3>אופציות משלוח</h3>
     ${delivery}
-
-    ${it.description_html ? `<h3>תיאור</h3><div class="panel">${it.description_html}</div>` : ''}
-
+    ${p.description_html ? `<h3>תיאור</h3><div class="panel">${p.description_html}</div>` : ''}
     <h3>ה-JSON של השורה הזאת</h3>
     <pre class="code code-sm">${esc(pretty(it))}</pre>`;
 
   $('#itemDlg').showModal();
 }
 
+/* ───────────────────────── paging ───────────────────────── */
+
+function renderPager() {
+  const more = state.items.length > 0;
+  $('#pager').innerHTML = `
+    <button class="btn btn-sm" id="prevPage" ${state.page <= 1 ? 'disabled' : ''}>הקודם</button>
+    <span class="count">עמוד ${state.page}${state.total ? ` · ${state.total} מוצרים בקטלוג` : ''}</span>
+    <button class="btn btn-sm" id="nextPage" ${more ? '' : 'disabled'}>הבא</button>`;
+  $('#prevPage')?.addEventListener('click', () => { if (state.page > 1) { state.page--; loadFeed(); } });
+  $('#nextPage')?.addEventListener('click', () => { state.page++; loadFeed(); });
+}
+
 /* ───────────────────────── order ───────────────────────── */
 
-function fillItemPickers() {
+function fillPickers() {
   const opts = state.items.map((it, i) =>
-    `<option value="${i}">${esc(it.item_id)} · ${esc(it.product_name).slice(0, 44)}${
+    `<option value="${i}">${esc(it.item_id)} · ${esc(it.product_name).slice(0, 40)}${
       (it.attributes || []).length ? ` · ${esc(it.attributes.map((a) => a.value).join('/'))}` : ''
     }${it.available ? '' : ' (לא זמין)'}</option>`).join('');
-
   $('#orderItem').innerHTML = opts;
   $('#hookItem').innerHTML = opts;
-
-  if (!$('#orderExt').value) {
-    $('#orderExt').value = `DEMO-${Date.now()}`;
-  }
+  if (!$('#orderExt').value) $('#orderExt').value = `DEMO-${Date.now()}`;
   syncOrder();
 }
 
-function currentOrderItem() {
-  return state.items[Number($('#orderItem').value)] || null;
-}
+const currentItem = () => state.items[Number($('#orderItem').value)] || null;
 
 function syncOrder() {
-  const it = currentOrderItem();
+  const it = currentItem();
   if (!it) return;
 
   const opts = it.delivery_options || [];
@@ -241,17 +374,17 @@ function syncOrder() {
     ? opts.map((d) => `<option value="${esc(d.code)}">${esc(d.code)} · ${esc(d.description)} · ${money(d.cost)}</option>`).join('')
     : '<option value="">— אין אופציית משלוח —</option>';
 
-  const warn = [];
-  if (!it.available) warn.push('הפריט מסומן לא זמין — ההזמנה תיענה ב-409.');
-  if (!opts.length) warn.push('אין אופציית משלוח — ההזמנה תיענה ב-400.');
-  $('#orderWarn').textContent = warn.join(' ');
+  const w = [];
+  if (!it.available) w.push('הפריט לא זמין — צפוי 409.');
+  if (!opts.length) w.push('אין אופציית משלוח — צפוי 400.');
+  $('#orderWarn').textContent = w.join(' ');
 
   $('#orderBody').textContent = pretty(orderBody());
   renderMath();
 }
 
 function orderBody() {
-  const it = currentOrderItem();
+  const it = currentItem();
   if (!it) return {};
   return {
     external_order_id: $('#orderExt').value,
@@ -268,54 +401,36 @@ function orderBody() {
 }
 
 function renderMath() {
-  const it = currentOrderItem();
+  const it = currentItem();
   if (!it) return;
-
   const qty = Number($('#orderQty').value || 1);
   const opt = (it.delivery_options || []).find((d) => d.code === $('#orderDelivery').value);
   const ship = opt ? (opt.is_individual ? opt.cost * qty : opt.cost) : 0;
-  const due = it.sale_price * qty + ship;
-
   $('#orderMath').innerHTML = `
-    ${money(it.sale_price)} × ${qty}
-    ${opt ? ` + משלוח ${money(opt.cost)}${opt.is_individual ? ` × ${qty}` : ''}` : ''}
-    = <b>${money(due)}</b>
-    <br><span class="sku">זה הסכום שהשותף חייב ל-BoomBuy על ההזמנה הזאת (amount_due).</span>`;
+    ${money(it.sale_price)} × ${qty}${opt ? ` + משלוח ${money(opt.cost)}${opt.is_individual ? ` × ${qty}` : ''}` : ''}
+    = <b>${money(it.sale_price * qty + ship)}</b>
+    <br><span class="sku">זה ה-amount_due שהשותף חייב ל-BoomBuy.</span>`;
 }
 
 async function sendOrder() {
   const out = $('#orderResp');
-
-  if (state.source !== 'live') {
-    // Nothing is posted in sample mode — a demo must never place a real order
-    // that reaches a real supplier by accident.
-    out.textContent = pretty({
-      _note: 'מצב דוגמה — לא נשלחה בקשה אמיתית. זו התשובה שהיתה חוזרת.',
-      boombuy_order_id: 123456,
-      external_order_id: $('#orderExt').value,
-      sale_price: currentOrderItem()?.sale_price,
-      quantity: Number($('#orderQty').value || 1),
-      shipping_cost: (currentOrderItem()?.delivery_options || [])
-        .find((d) => d.code === $('#orderDelivery').value)?.cost ?? 0,
-      amount_due: '…',
-      delivery_timeframe: (currentOrderItem()?.delivery_options || [])
-        .find((d) => d.code === $('#orderDelivery').value)?.timeframe ?? null,
-    });
-    return;
-  }
-
-  if (!confirm('מצב API חי — זו הזמנה אמיתית שתגיע לספק. להמשיך?')) return;
+  if (!confirm('זו הזמנה אמיתית מול ה-API. ההזמנה תיווצר ודיווח יישלח לספק. להמשיך?')) return;
 
   out.textContent = '…שולח…';
   try {
+    const t0 = performance.now();
     const res = await fetch(`${state.base.replace(/\/+$/, '')}/api/v1/partner/orders`, {
       method: 'POST',
       headers: { 'X-API-Key': state.key, 'Content-Type': 'application/json' },
       body: JSON.stringify(orderBody()),
     });
+    const ms = Math.round(performance.now() - t0);
     const text = await res.text();
     let body; try { body = JSON.parse(text); } catch { body = text; }
-    out.textContent = `HTTP ${res.status}\n\n${typeof body === 'string' ? body : pretty(body)}`;
+    out.textContent = `HTTP ${res.status} · ${ms} ms\n\n${typeof body === 'string' ? body : pretty(body)}`;
+    // A new reference, so the next send is not swallowed by idempotency.
+    $('#orderExt').value = `DEMO-${Date.now()}`;
+    syncOrder();
   } catch (err) {
     out.textContent = `שגיאת רשת: ${err.message}`;
   }
@@ -326,11 +441,10 @@ async function sendOrder() {
 function renderWebhook() {
   const it = state.items[Number($('#hookItem').value)] || state.items[0];
   if (!it) return;
-
   const ts = Math.floor(Date.now() / 1000);
 
   $('#hookHeaders').textContent =
-    `Content-Type: application/json
+`Content-Type: application/json
 X-BoomBuy-Event: product.unavailable
 X-BoomBuy-Event-Id: ${crypto.randomUUID()}
 X-BoomBuy-Timestamp: ${ts}
@@ -341,12 +455,8 @@ X-BoomBuy-Signature: sha256=<hmac של "${ts}." + גוף ההודעה, עם מפ
     event: 'product.unavailable',
     occurred_at: new Date().toISOString(),
     data: {
-      item_id: it.item_id,
-      product_id: it.product_id,
-      product_sku: it.product_sku,
-      variation_id: it.variation_id,
-      variation_sku: it.variation_sku,
-      sku: it.sku,
+      item_id: it.item_id, product_id: it.product_id, product_sku: it.product_sku,
+      variation_id: it.variation_id, variation_sku: it.variation_sku, sku: it.sku,
       available: false,
     },
   });
@@ -356,20 +466,20 @@ X-BoomBuy-Signature: sha256=<hmac של "${ts}." + גוף ההודעה, עם מפ
 
 const FIELDS = [
   ['item_id', 'המזהה שהשותף מחזיר בהזמנה. למוצר עם וריאציות: "מוצר:וריאציה".'],
-  ['product_id', 'מזהה המוצר האב. זהה לכל הוריאציות שלו, ומשמש לקיבוץ.'],
+  ['product_id', 'מזהה המוצר האב. זהה לכל הוריאציות — זה מה שמקבץ אותן לכרטיס אחד.'],
   ['product_name', 'שם המוצר. מגיע גם בשורת וריאציה.'],
   ['product_sku', 'מק״ט המוצר האב.'],
   ['variation_id', 'מזהה הוריאציה, או null במוצר פשוט.'],
   ['variation_name', 'שם הוריאציה. ריק ברוב הקטלוג — אל תסתמך עליו.'],
   ['variation_sku', 'מק״ט הוריאציה. גם הוא ריק ברוב הקטלוג.'],
   ['sku', 'מק״ט הוריאציה אם יש, אחרת של המוצר.'],
-  ['attributes', 'מה שמבדיל בין הוריאציות: [{name:"מידה", value:"L"}]. ריק במוצר פשוט.'],
+  ['attributes', 'מה שמבדיל בין הוריאציות: [{name:"מידה", value:"L"}]. זה מה שמייצר את ה-SELECT.'],
   ['category_id', 'מזהה קטגוריה. יציב — קבץ לפיו ולא לפי השם.'],
   ['category_name', 'שם הקטגוריה לתצוגה. ניתן לעריכה ואינו ייחודי.'],
   ['description', 'תיאור קצר, טקסט רגיל. ריק ברוב המוצרים.'],
   ['description_html', 'התיאור השיווקי, HTML.'],
   ['supplier_name', 'מי מספק בפועל.'],
-  ['images', 'אובייקט: {desktop: [...], mobile: [...]}. mobile ריק ברוב המוצרים — יש ליפול חזרה לדסקטופ.'],
+  ['images', '{desktop: [...], mobile: [...]}. mobile ריק ברוב המוצרים — יש ליפול חזרה לדסקטופ.'],
   ['sale_price', 'המחיר הסופי לפריט, כולל תוספת וריאציה ובונוס תמחור. זה מה שהשותף חייב.'],
   ['available', 'האם מותר למכור. בוליאני בלבד — כמויות מלאי לא נחשפות לעולם.'],
   ['modified_date', 'מתי המוצר עודכן אצלנו לאחרונה. זה לא תאריך תפוגה.'],
@@ -389,19 +499,25 @@ function wire() {
   $('#search').addEventListener('input', renderGrid);
   $('#onlyAvailable').addEventListener('change', renderGrid);
   $('#mobileView').addEventListener('change', renderGrid);
+  $('#onlyVariations').addEventListener('change', renderGrid);
+  $('#reload').addEventListener('click', loadFeed);
+  $('#limit').addEventListener('change', () => { state.limit = Number($('#limit').value); state.page = 1; loadFeed(); });
 
+  $('#grid').addEventListener('change', onPick);
   $('#grid').addEventListener('click', (e) => {
+    const btn = e.target.closest('.details');
+    if (btn) { showProduct(Number(btn.dataset.pid)); return; }
+    if (e.target.closest('select')) return;   // picking a size is not "open"
     const card = e.target.closest('.card');
-    if (card) showItem(Number(card.dataset.idx));
+    if (card) showProduct(Number(card.dataset.pid));
   });
   $('#itemClose').addEventListener('click', () => $('#itemDlg').close());
 
   ['#orderItem', '#orderQty', '#orderDelivery', '#orderExt', '#orderName',
    '#orderPhone', '#orderEmail', '#orderStreet', '#orderHouse', '#orderCity']
-    .forEach((sel) => $(sel).addEventListener('input', syncOrder));
+    .forEach((s) => $(s).addEventListener('input', syncOrder));
   $('#orderItem').addEventListener('change', syncOrder);
   $('#btnSendOrder').addEventListener('click', sendOrder);
-
   $('#hookItem').addEventListener('change', renderWebhook);
 
   $('#copyRaw').addEventListener('click', async () => {
@@ -413,61 +529,43 @@ function wire() {
   $('#fieldsBody').innerHTML = FIELDS
     .map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join('');
 
-  const dlg = $('#liveDlg');
-  $('#btnLive').addEventListener('click', () => {
-    $('#liveBase').value = state.base || 'https://boomclub.org.il';
-    $('#liveKey').value = state.key || '';
+  const dlg = $('#connDlg');
+  $('#btnConn').addEventListener('click', () => {
+    $('#connBase').value = state.base;
+    $('#connKey').value = state.key;
     dlg.showModal();
   });
-
-  dlg.addEventListener('close', async () => {
-    if (dlg.returnValue === 'sample') {
+  dlg.addEventListener('close', () => {
+    if (dlg.returnValue === 'reset') {
       localStorage.removeItem(LS_KEY);
-      state.base = state.key = '';
-      adopt(await loadSample(), 'sample');
+      const c = creds(); state.base = c.base; state.key = c.key;
+    } else if (dlg.returnValue === 'connect') {
+      state.base = $('#connBase').value.trim();
+      state.key = $('#connKey').value.trim();
+      localStorage.setItem(LS_KEY, JSON.stringify({ base: state.base, key: state.key }));
+    } else {
       return;
     }
-    if (dlg.returnValue !== 'connect') return;
-
-    const base = $('#liveBase').value.trim();
-    const key = $('#liveKey').value.trim();
-    if (!base || !key) return;
-
-    try {
-      const payload = await loadLive(base, key);
-      state.base = base;
-      state.key = key;
-      localStorage.setItem(LS_KEY, JSON.stringify({ base, key }));
-      adopt(payload, 'live');
-    } catch (err) {
-      alert(`החיבור נכשל.\n\n${err.message}`);
-    }
+    $('#host').textContent = state.base;
+    state.page = 1;
+    loadFeed();
   });
 }
 
-async function boot() {
+function boot() {
   wire();
+  const c = creds();
+  state.base = c.base;
+  state.key = c.key;
+  $('#host').textContent = state.base || '— לא מוגדר —';
 
-  // A key saved earlier is reused, but a failure falls back to the sample
-  // rather than leaving the page blank.
-  let saved = null;
-  try { saved = JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch { /* ignore */ }
-
-  if (saved?.base && saved?.key) {
-    try {
-      const payload = await loadLive(saved.base, saved.key);
-      state.base = saved.base;
-      state.key = saved.key;
-      adopt(payload, 'live');
-      return;
-    } catch { /* fall through to the sample */ }
+  if (!state.base || !state.key) {
+    setStatus('⛔ אין הגדרות חיבור', 'bad');
+    $('#emptyState').hidden = false;
+    $('#emptyState').innerHTML = 'לחץ על <b>הגדרות חיבור</b> והזן כתובת בסיס ומפתח API.';
+    return;
   }
-
-  try {
-    adopt(await loadSample(), 'sample');
-  } catch (err) {
-    $('#grid').innerHTML = `<p class="empty">טעינת נתוני הדוגמה נכשלה: ${esc(err.message)}</p>`;
-  }
+  loadFeed();
 }
 
 boot();

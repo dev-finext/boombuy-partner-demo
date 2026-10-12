@@ -19,8 +19,9 @@
   </div>
 
   <div class="source">
-    <span id="sourceBadge" class="badge badge-sample">נתוני דוגמה</span>
-    <button id="btnLive" class="btn btn-ghost">התחבר ל-API חי</button>
+    <span id="status" class="badge badge-busy">…</span>
+    <code id="host" class="host"></code>
+    <button id="btnConn" class="btn btn-ghost">הגדרות חיבור</button>
   </div>
 </header>
 
@@ -44,10 +45,18 @@
       <label class="switch">
         <input type="checkbox" id="mobileView"> תצוגת תמונות מובייל
       </label>
+      <label class="switch">
+        <input type="checkbox" id="onlyVariations"> רק מוצרים עם וריאציות
+      </label>
+      <label class="switch">כמות
+        <select id="limit"><option>50</option><option selected>100</option><option>200</option></select>
+      </label>
+      <button id="reload" class="btn btn-sm">רענן מה-API</button>
       <span id="count" class="count"></span>
     </div>
     <div id="grid" class="grid"></div>
-    <p id="emptyState" class="empty" hidden>לא נמצאו פריטים.</p>
+    <p id="emptyState" class="empty" hidden></p>
+    <div id="pager" class="pager"></div>
   </section>
 
   <!-- ─────────── raw feed ─────────── -->
@@ -64,7 +73,7 @@
   <section id="view-order" class="view">
     <p class="lede">
       שותף שולח <code>POST /api/v1/partner/orders</code> — פריט אחד בכל קריאה.
-      בחר פריט מהקטלוג והטופס יתמלא לבד.
+      בחר פריט והטופס יתמלא לבד. <strong>השליחה אמיתית</strong> — ההזמנה תיווצר ודיווח יישלח לספק.
     </p>
 
     <div class="order-grid">
@@ -136,26 +145,22 @@
 </main>
 
 <!-- ─────────── live-connection dialog ─────────── -->
-<dialog id="liveDlg">
+<dialog id="connDlg">
   <form method="dialog" class="dlg">
-    <h3>חיבור ל-API חי</h3>
+    <h3>הגדרות חיבור</h3>
     <p class="dlg-note">
-      המפתח נשמר <strong>רק בדפדפן שלך</strong> (localStorage) ולא נשלח לשום מקום חוץ מ-BoomBuy.
-      הוא לא נשמר בקוד של האתר.
+      ברירת המחדל מגיעה מ-<code>assets/config.js</code>. שינוי כאן נשמר ב-<code>localStorage</code>
+      של הדפדפן שלך בלבד ודורס את ברירת המחדל.
     </p>
-    <label>כתובת בסיס
-      <input id="liveBase" type="url" placeholder="https://boomclub.org.il" value="https://boomclub.org.il">
-    </label>
-    <label>מפתח API
-      <input id="liveKey" type="password" placeholder="bbk_…" autocomplete="off">
-    </label>
+    <label>כתובת בסיס <input id="connBase" type="url" placeholder="https://biga.co.il"></label>
+    <label>מפתח API <input id="connKey" type="text" placeholder="bbk_…" autocomplete="off"></label>
     <p class="dlg-warn">
-      ⚠️ הקריאה יוצאת <strong>מהדפדפן שלך</strong>, כך ש-<strong>כתובת ה-IP שלך</strong> חייבת להיות
-      ברשימה המורשית של השותף. מכתובת אחרת תתקבל שגיאת 401.
+      ⚠️ הקריאה יוצאת <strong>מהדפדפן שלך</strong>, כך ש<strong>כתובת ה-IP שלך</strong> חייבת
+      להיות ברשימה המורשית של השותף. מכתובת אחרת תתקבל 401.
     </p>
     <div class="row">
-      <button value="connect" class="btn btn-primary">התחבר</button>
-      <button value="sample" class="btn btn-ghost">חזרה לנתוני דוגמה</button>
+      <button value="connect" class="btn btn-primary">שמור והתחבר</button>
+      <button value="reset" class="btn btn-ghost">חזרה לברירת המחדל</button>
       <button value="cancel" class="btn btn-ghost">ביטול</button>
     </div>
   </form>
@@ -169,6 +174,7 @@
   </div>
 </dialog>
 
+<script src="assets/config.js"></script>
 <script src="assets/app.js"></script>
 </body>
 </html>

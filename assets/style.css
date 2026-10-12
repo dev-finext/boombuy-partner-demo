@@ -205,3 +205,24 @@ dialog::backdrop { background: rgba(29,26,43,.5); }
   .grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
   .kv th { width: 110px; }
 }
+
+/* ─── live-API additions ─── */
+.badge-busy { background: #fff3cd; color: var(--warn); }
+.badge-ok   { background: var(--ok-soft); color: var(--ok); }
+.badge-bad  { background: var(--bad-soft); color: var(--bad); }
+.host { background: rgba(255,255,255,.16); color: #fff; font-size: 12px; }
+
+.btn-sm { padding: 6px 11px; font-size: 13px; }
+.picks { display: flex; flex-wrap: wrap; gap: 8px; }
+.pick { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--muted); flex: 1 1 90px; }
+.pick select {
+  font: inherit; font-size: 13px; padding: 5px 7px;
+  border: 1px solid var(--line); border-radius: 7px; background: #fff; color: var(--ink);
+}
+.pill-var { inset-inline-start: auto; inset-inline-end: 8px; background: var(--brand-soft); color: var(--brand); }
+.card .details { width: 100%; margin-top: 4px; }
+.pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 26px; }
+.variants th, .variants td { padding: 6px 9px; font-size: 13px; }
+.variants tr.is-sel { background: var(--brand-soft); }
+.variants thead th { color: var(--muted); font-weight: 600; }
+#limit { font: inherit; font-size: 13px; padding: 4px 7px; border: 1px solid var(--line); border-radius: 7px; }
